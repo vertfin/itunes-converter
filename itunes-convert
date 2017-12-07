@@ -1,0 +1,147 @@
+#!/usr/bin/env ruby
+
+# JMS 2017
+
+require 'tempfile'
+
+MIN_PLAY_TIME = (ENV['MIN_PLAY_TIME'] || 12).to_i # seconds
+
+puts
+puts "Convert a directory of .wav files to iTunes plus AAC .m4a"
+puts "---------------------------------------------------------"
+
+class WavFile
+
+  @@forked_pid = nil
+  @@forked_at = nil
+
+  def initialize(filename)
+    @filename = File.basename(filename)
+  end
+
+  def check
+    puts "Checking #{@filename}..." if check?
+    rtn = run_command("afclip -x \"#{@filename}\"", if: check?).to_s
+    if !rtn.index("-- xno samples clipped --").nil?
+      if verbose?
+        puts "afclip returned:"
+        puts rtn
+      end
+      puts "Clipping reported in #{@filename}!!!"
+      return false
+    end
+    true
+  end
+
+  def convert
+    puts "\nConverting #{@filename}..." if convert?
+    # we want to see the commands here in verbose mode, even if we don't run them.
+    base = @filename[0...-4]
+    tmp = ::Tempfile.new(['itunes-convert-intermediate','.caf'])
+    run_command "afconvert \"#{@filename}\" \"#{tmp.path}\" -d 0 -f caff --soundcheck-generate", if: convert?
+    run_command "afconvert \"#{tmp.path}\" -d aac -f m4af -u pgcm 2 --soundcheck-read -b 256000 -q 127 -s 2 \"#{base}.m4a\"", if: convert?
+    tmp.unlink
+    self
+  end
+
+  def play
+    silence!
+    puts "Playing #{m4a_filename}..." if play?
+    run_command "afplay \"#{m4a_filename}\"", if: play?, fork: true
+    self
+  end
+
+  def silence!
+    if pid = @@forked_pid
+      elapsed_play_time = (Time.now - @@forked_at).to_i
+
+      if elapsed_play_time < ::MIN_PLAY_TIME
+        delay = ::MIN_PLAY_TIME - elapsed_play_time
+        puts "We've only been playing for #{elapsed_play_time}s, need to play for #{MIN_PLAY_TIME}s, waiting #{delay}s before proceeding..." if verbose?
+        sleep delay
+      end
+      puts "Killing PID #{pid}" if self.verbose?
+      Process.kill('HUP',pid)
+    end
+  end
+
+  private
+  def run_command cmd, options={}
+    options = { if: true, fork: nil }.merge(options)
+    puts "#{ 'NOT ' unless options[:if] }RUNNING: #{cmd}" if verbose?
+    if options[:if]
+      if options[:fork]
+        @@forked_at = Time.now
+        @@forked_pid = Process.spawn(cmd)
+        puts "Forked PID is #{@@forked_pid}" if verbose?
+      else
+        `#{cmd}`
+      end
+    end
+  end
+
+  def m4a_filename
+    @filename[0...-4] + '.m4a'
+  end
+
+end
+
+@options = {
+  'convert' => 'Actually convert the wav to m4a.',
+  'verbose' => 'Show the commands that will be run.',
+  'play' => "Play the converted files, with minimum play time of #{MIN_PLAY_TIME}s. You can override this value with an environment variable called MIN_PLAY_TIME.",
+  'check' => 'Run some basic sanity checks on the input file (afclip).',
+}
+
+args = ARGV
+
+negated_args = args.select { |arg| arg[0]=='-' && arg[1]!='-' }
+args -= negated_args
+negated_args = negated_args.collect { |arg| arg[1..-1] }
+args = @options.keys if args.empty?
+args -= negated_args
+
+@options.keys.each do |option|
+  WavFile.send :define_method, option+'?' do
+    args.include?(option)
+  end
+end
+
+puts "OPTIONS: #{args.join(' ')}\n"
+
+instructions = ((args - @options.keys).length > 0) || args.length==0
+
+if instructions
+  @options.each do |key, description|
+    puts "#{key}:"
+    puts "#{description}"
+    puts
+  end
+  puts
+  puts "Passing no options is the equivalent of 'itunes-convert #{@options.keys.join(' ')}'"
+  puts "Options can be negated, as well: 'itunes-convert -check -verbose'"
+  puts
+  exit
+end
+
+files = Dir.glob('*.wav')
+puts "wav files found: #{files.length}\n\n"
+exit if files.length==0
+
+wav_files = files.collect { |file| WavFile.new(file) }
+
+if wav_files.all?(&:check)
+  puts
+else
+  puts "\nCowardly refusing to continue.\n\n"
+  exit
+end
+
+wav_files.each do |wav_file|
+  wav_file.convert
+  wav_file.play
+end
+
+wav_files.last.silence!
+
+puts "\nBye.\n\n"
