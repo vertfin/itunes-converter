@@ -15,30 +15,54 @@ class WavFile
   @@forked_pid = nil
   @@forked_at = nil
 
+  attr_reader :errors
+
   def initialize(filename)
-    @filename = File.basename(filename)
+    @filename_wav = File.basename(filename)
+    @filename_m4a = @filename_wav[0...-4] + '.m4a'
+    @errors = []
   end
 
-  def check
-    puts "Checking #{@filename}..." if check?
-    rtn = run_command("afclip -x \"#{@filename}\"", if: check?).to_s
-    if !rtn.index("-- xno samples clipped --").nil?
-      if verbose?
-        puts "afclip returned:"
-        puts rtn
-      end
-      puts "Clipping reported in #{@filename}!!!"
+  def format_check
+    puts "Checking format of #{@filename_wav}..." if check?
+    rtn = run_command("afinfo \"#{@filename_wav}\"", if: check?).to_s
+    if rtn.index("2 ch,  44100 Hz, 'lpcm' (0x0000000C) 24-bit little-endian signed integer").nil?
+      puts "Unexpected Format:"
+      puts "------------------"
+      puts rtn
+      puts
+
+      @errors << "UNEXPECTED INPUT FORMAT: #{@filename_wav}"
       return false
+    else
+      puts "24bit 44100Hz WAV, looks good."
     end
     true
   end
 
+  def clip_check
+    puts "Checking #{@filename_m4a} for clips..." if check?
+    rtn = run_command("afclip -x \"#{@filename_m4a}\"", if: check?).to_s
+    if rtn.index("-- no samples clipped --").nil?
+      @errors << "CLIPPING DETECTED: #{@filename_m4a}"
+      if verbose?
+        puts "afclip returned:"
+        puts rtn
+      end
+      puts "Clipping reported in #{@filename_m4a}!!!"
+      false
+    else
+      puts "No clipping found."
+      true
+    end
+  end
+
   def convert
-    puts "\nConverting #{@filename}..." if convert?
+    puts "Converting #{@filename_wav}..." if convert?
     # we want to see the commands here in verbose mode, even if we don't run them.
-    base = @filename[0...-4]
+    base = @filename_wav[0...-4]
     tmp = ::Tempfile.new(['itunes-convert-intermediate','.caf'])
-    run_command "afconvert \"#{@filename}\" \"#{tmp.path}\" -d 0 -f caff --soundcheck-generate", if: convert?
+    run_command "afconvert \"#{@filename_wav}\" \"#{tmp.path}\" -d 0 -f caff --soundcheck-generate", if: convert?
     run_command "afconvert \"#{tmp.path}\" -d aac -f m4af -u pgcm 2 --soundcheck-read -b 256000 -q 127 -s 2 \"#{base}.m4a\"", if: convert?
     tmp.unlink
     self
@@ -46,8 +70,8 @@ class WavFile
 
   def play
     silence!
-    puts "Playing #{m4a_filename}..." if play?
-    run_command "afplay \"#{m4a_filename}\"", if: play?, fork: true
+    puts "Playing #{@filename_m4a}..." if play?
+    run_command "afplay \"#{@filename_m4a}\"", if: play?, fork: true
     self
   end
 
@@ -78,10 +102,6 @@ class WavFile
         `#{cmd}`
       end
     end
-  end
-
-  def m4a_filename
-    @filename[0...-4] + '.m4a'
   end
 
 end
@@ -130,18 +150,23 @@ exit if files.length==0
 
 wav_files = files.collect { |file| WavFile.new(file) }
 
-if wav_files.all?(&:check)
-  puts
-else
-  puts "\nCowardly refusing to continue.\n\n"
-  exit
-end
-
+all_errors = []
 wav_files.each do |wav_file|
+  wav_file.format_check
   wav_file.convert
   wav_file.play
+  wav_file.clip_check
+  puts
+  all_errors += wav_file.errors
 end
 
 wav_files.last.silence!
+
+if !all_errors.empty?
+  puts
+  puts "THERE WERE SOME CHECK ERRORS:"
+  puts "-----------------------------"
+  puts all_errors.join("\n")
+end
 
 puts "\nBye.\n\n"
